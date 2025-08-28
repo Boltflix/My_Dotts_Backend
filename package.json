@@ -1,19 +1,20 @@
 {
   "name": "my_dotts_backend",
-  "version": "0.2.0",
-  "private": true,
+  "version": "1.0.0",
+  "description": "Backend do Dotts (Stripe + Supabase + Webhooks + Diário IA)",
   "type": "module",
+  "main": "server.js",
   "scripts": {
-    "dev": "node src/index.js",
-    "start": "node src/index.js"
+    "dev": "node server.js",
+    "start": "node server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=18.17.0"
   },
   "dependencies": {
-    "cookie-parser": "^1.4.6",
+    "@supabase/supabase-js": "^2.45.4",
+    "body-parser": "^1.20.2",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "stripe": "^16.6.0"
   }
