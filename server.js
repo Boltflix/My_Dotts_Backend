@@ -1,5 +1,5 @@
-// server.js — backend Stripe com debug de prices
-// (cole este arquivo inteiro no lugar do seu)
+// server.js — backend Stripe com debug de prices (Stripe Tax desativado)
+// SUBSTITUA seu server.js inteiro por ESTE arquivo.
 
 import express from 'express';
 import cors from 'cors';
@@ -56,8 +56,7 @@ app.get('/api/debug-config', (_req, res) => {
   });
 });
 
-// ---------- DEBUG DE PRICES (NOVA ROTA) ----------
-// Checa se os price IDs existem e estão em modo live.
+// ---------- DEBUG DE PRICES ----------
 app.get('/api/debug-prices', async (_req, res) => {
   try {
     if (!STRIPE_SECRET_KEY) throw new Error('STRIPE_SECRET_KEY ausente');
@@ -141,12 +140,12 @@ async function createCheckoutSession(plan, email) {
     throw e;
   }
 
+  // ⚠️ Stripe Tax REMOVIDO (automatic_tax) porque sua conta/país não suportam
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
     line_items: [{ price, quantity: 1 }],
     customer_email: email || undefined,
     allow_promotion_codes: true,
-    automatic_tax: { enabled: true },
     billing_address_collection: 'auto',
     success_url: `${FRONTEND_ORIGIN}/plans?success=1`,
     cancel_url: `${FRONTEND_ORIGIN}/plans?cancelled=1`,
