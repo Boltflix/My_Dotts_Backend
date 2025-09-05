@@ -1,27 +1,24 @@
-// server.js — backend Stripe com debug de prices (Stripe Tax desativado)
+// server.js — Stripe (assinatura) com trial de 30 dias e sem Stripe Tax
 // SUBSTITUA seu server.js inteiro por ESTE arquivo.
 
 import express from 'express';
 import cors from 'cors';
 import Stripe from 'stripe';
 
-// ---------- ENV ----------
 const {
   PORT = 8080,
   NODE_ENV = 'production',
-
-  // defina no Render para o domínio que você usa
   FRONTEND_ORIGIN = 'https://mydotts.com',
 
   STRIPE_SECRET_KEY,        // sk_live_...
   STRIPE_PRICE_MONTHLY,     // price_... (LIVE)
   STRIPE_PRICE_ANNUAL,      // price_... (LIVE)
+  STRIPE_WEBHOOK_SECRET,    // whsec_... (opcional)
 
-  // opcional (apenas se usar webhook)
-  STRIPE_WEBHOOK_SECRET     // whsec_...
+  // Se quiser mudar o trial sem mexer no código:
+  TRIAL_DAYS = '30',        // por padrão 30 dias
 } = process.env;
 
-// ---------- APP / CORS ----------
 const app = express();
 
 const allowedOrigins = Array.from(new Set([
@@ -34,29 +31,29 @@ const allowedOrigins = Array.from(new Set([
 
 app.use(cors({
   origin: (origin, cb) => {
-    if (!origin) return cb(null, true);               // permite curl/Invoke
+    if (!origin) return cb(null, true);
     if (allowedOrigins.includes(origin)) return cb(null, true);
     return cb(new Error(`CORS blocked for origin: ${origin}`));
   },
   credentials: true,
 }));
 
-// ---------- HEALTH & DEBUG BÁSICO ----------
+/* ---------- Health & Debug ---------- */
 app.get('/api/health', (_req, res) => res.json({ ok: true, env: NODE_ENV }));
 
 app.get('/api/debug-config', (_req, res) => {
   res.json({
     FRONTEND_ORIGIN,
     STRIPE_SECRET_KEY_present: !!STRIPE_SECRET_KEY,
-    STRIPE_SECRET_KEY_prefix: STRIPE_SECRET_KEY ? STRIPE_SECRET_KEY.slice(0, 7) : null, // "sk_live"
+    STRIPE_SECRET_KEY_prefix: STRIPE_SECRET_KEY ? STRIPE_SECRET_KEY.slice(0, 7) : null,
     STRIPE_PRICE_MONTHLY_present: !!STRIPE_PRICE_MONTHLY,
     STRIPE_PRICE_ANNUAL_present: !!STRIPE_PRICE_ANNUAL,
+    TRIAL_DAYS,
     allowed_origins: allowedOrigins,
     tip: 'Use chave LIVE (sk_live_) e preços LIVE (price_...).',
   });
 });
 
-// ---------- DEBUG DE PRICES ----------
 app.get('/api/debug-prices', async (_req, res) => {
   try {
     if (!STRIPE_SECRET_KEY) throw new Error('STRIPE_SECRET_KEY ausente');
@@ -93,19 +90,19 @@ app.get('/api/debug-prices', async (_req, res) => {
   }
 });
 
-// ---------- WEBHOOK (RAW) ----------
+/* ---------- Webhook (RAW) ---------- */
 app.post('/api/stripe/webhook',
   express.raw({ type: 'application/json' }),
   (req, res) => {
     if (!STRIPE_SECRET_KEY || !STRIPE_WEBHOOK_SECRET) {
-      console.error('Webhook sem chave/segredo — ignorando verificação.');
+      console.warn('Webhook sem chave/segredo — pulando verificação.');
       return res.status(200).json({ received: true });
     }
     try {
       const stripe = new Stripe(STRIPE_SECRET_KEY, { apiVersion: '2024-06-20' });
       const sig = req.headers['stripe-signature'];
       const event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
-      // TODO: tratar eventos conforme necessário
+      // TODO: tratar eventos (checkout.session.completed, customer.subscription.updated, etc.)
       return res.json({ received: true, type: event?.type });
     } catch (err) {
       console.error('Webhook verify failed:', err?.message);
@@ -114,11 +111,10 @@ app.post('/api/stripe/webhook',
   }
 );
 
-// ---------- PARSERS PARA AS DEMAIS ROTAS ----------
+/* ---------- Parsers para demais rotas ---------- */
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-// Helpers
 function getStripe() {
   if (!STRIPE_SECRET_KEY) {
     const e = new Error('STRIPE_SECRET_KEY ausente');
@@ -128,24 +124,49 @@ function getStripe() {
   return new Stripe(STRIPE_SECRET_KEY, { apiVersion: '2024-06-20' });
 }
 
-async function createCheckoutSession(plan, email) {
-  const stripe = getStripe();
-  const price = String(plan).toLowerCase() === 'annual'
-    ? STRIPE_PRICE_ANNUAL
-    : STRIPE_PRICE_MONTHLY;
+function pickPriceId(plan) {
+  return String(plan).toLowerCase() === 'annual' ? STRIPE_PRICE_ANNUAL : STRIPE_PRICE_MONTHLY;
+}
 
+/* ---------- Core: criar sessão com TRIAL ---------- */
+async function createCheckoutSession({ plan, email, promoCode }) {
+  const stripe = getStripe();
+  const price = pickPriceId(plan);
   if (!price) {
     const e = new Error('Preço não configurado');
     e.code = 'NO_PRICE';
     throw e;
   }
 
-  // ⚠️ Stripe Tax REMOVIDO (automatic_tax) porque sua conta/país não suportam
+  // (opcional) procurar promotion code para pré-aplicar
+  let discounts;
+  if (promoCode) {
+    try {
+      const found = await stripe.promotionCodes.list({ code: promoCode, active: true, limit: 1 });
+      if (found?.data?.length) discounts = [{ promotion_code: found.data[0].id }];
+    } catch (e) {
+      console.warn('promotion code lookup failed:', e?.message);
+    }
+  }
+
+  const trialDays = Number.parseInt(TRIAL_DAYS, 10) || 30;
+
+  // IMPORTANTE:
+  // - payment_method_collection: 'always' → coleta cartão mesmo com trial
+  // - subscription_data.trial_period_days: trial de 30 dias
+  // - REMOVIDO automatic_tax (Stripe Tax não suportado na sua conta/país)
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
     line_items: [{ price, quantity: 1 }],
     customer_email: email || undefined,
+    payment_method_collection: 'always',
     allow_promotion_codes: true,
+    ...(discounts ? { discounts } : {}),
+    subscription_data: {
+      trial_period_days: trialDays,
+      // Opcional: se quiser cancelar se cliente não tiver PM no fim do trial
+      // trial_settings: { end_behavior: { missing_payment_method: 'cancel' } },
+    },
     billing_address_collection: 'auto',
     success_url: `${FRONTEND_ORIGIN}/plans?success=1`,
     cancel_url: `${FRONTEND_ORIGIN}/plans?cancelled=1`,
@@ -154,12 +175,11 @@ async function createCheckoutSession(plan, email) {
   return session;
 }
 
-// ---------- CHECKOUT ----------
+/* ---------- Rotas ---------- */
 app.post('/api/stripe/checkout', async (req, res) => {
   try {
-    const plan = req.body?.plan || 'monthly';
-    const email = req.body?.email || undefined;
-    const session = await createCheckoutSession(plan, email);
+    const { plan = 'monthly', email, promo } = req.body || {};
+    const session = await createCheckoutSession({ plan, email, promoCode: promo });
     return res.json({ url: session.url });
   } catch (e) {
     console.error('checkout error -> name:', e?.name);
@@ -172,12 +192,11 @@ app.post('/api/stripe/checkout', async (req, res) => {
   }
 });
 
-// Alias compat
+// Alias de compatibilidade
 app.post('/api/stripe/create-checkout-session', async (req, res) => {
   try {
-    const plan = req.body?.plan || 'monthly';
-    const email = req.body?.email || undefined;
-    const session = await createCheckoutSession(plan, email);
+    const { plan = 'monthly', email, promo } = req.body || {};
+    const session = await createCheckoutSession({ plan, email, promoCode: promo });
     return res.json({ url: session.url });
   } catch (e) {
     console.error('checkout (alias) error:', e?.message);
@@ -185,17 +204,13 @@ app.post('/api/stripe/create-checkout-session', async (req, res) => {
   }
 });
 
-// ---------- PORTAL ----------
 app.post('/api/stripe/portal', async (req, res) => {
   try {
     const stripe = getStripe();
     const email = req.body?.email;
     if (!email) return res.status(400).json({ error: 'Email necessário' });
 
-    const customers = await stripe.customers.search({
-      query: `email:"${email}"`,
-    });
-
+    const customers = await stripe.customers.search({ query: `email:"${email}"` });
     if (!customers?.data?.length) {
       return res.status(404).json({ error: 'Customer não encontrado para este e-mail' });
     }
@@ -214,13 +229,13 @@ app.post('/api/stripe/portal', async (req, res) => {
   }
 });
 
-// Alias compat
+// Alias do portal
 app.post('/api/stripe/create-portal-session', async (req, res) => {
   req.url = '/api/stripe/portal';
   app._router.handle(req, res, () => {});
 });
 
-// ---------- START ----------
+/* ---------- Start ---------- */
 app.listen(PORT, () => {
   console.log(`API on :${PORT} env=${NODE_ENV}`);
 });
